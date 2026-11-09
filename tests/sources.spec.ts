@@ -1183,6 +1183,21 @@ describe('feishu event consumer', () => {
     await vi.waitFor(() => expect(health.feishu).toMatchObject({ state: 'ready' }), until)
     controller.abort(); await running; store.close()
   }, 20_000)
+  it('keeps its five-second source-off check from throwing once the Store is closed', async () => {
+    // The check that stops the consumer within five seconds reads the Source's configuration, which needs the Store.
+    // A shutdown closes the Store while that interval may still be live, and the throw it caused took the whole
+    // process down ("database is not open"), so the tick must survive a closed Store.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const { ctx, health, store } = consumerSource(cli('ready'))
+    running = runFeishu(ctx, controller.signal)
+    await vi.waitFor(() => expect(health.feishu).toMatchObject({ state: 'ready', detail: 'Listening for bot events' }), until)
+    // The consumer keeps running, so its check interval stays live; the Store closes under it, as it does on shutdown.
+    store.close()
+    const tick = () => vi.advanceTimersByTimeAsync(5000)
+    await expect(tick()).resolves.not.toThrow()
+    await expect(tick()).resolves.not.toThrow()
+    controller.abort(); await running
+  }, 20_000)
 })
 
 describe('observing the GitHub repository', () => {

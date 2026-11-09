@@ -18,6 +18,15 @@ import type { FeishuConfig } from './feishu.ts'
 export const runFeishu = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
   Promise.allSettled([watch, backfillLoop, chatNamesLoop].map(loop => loop(ctx, signal)))
 const enabled = (ctx: SourceContext): FeishuConfig | undefined => ctx.config<FeishuConfig>(SOURCE)
+/**
+ * Whether the Source is still on, as the consumer's check sees it. Reading the Source's configuration needs the Store,
+ * which a shutdown closes while a timer of ours may still be live; that read throws once the Store is closed, and a throw
+ * from a timer takes the whole process down. A Source that cannot be read is off, which stops the consumer.
+ */
+const stillEnabled = (ctx: SourceContext): boolean => {
+  try { return enabled(ctx) !== undefined }
+  catch { return false }
+}
 const bot = (ctx: SourceContext): FeishuBot => {
   const resolved = ctx.deployment.feishu
   if (!resolved) throw new Error('The Feishu Source has no working bot CLI')
@@ -46,13 +55,16 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   if (!available(ctx)) return
   let retry: number | undefined
   while (!signal.aborted) {
-    if (!enabled(ctx)) {
+    if (!stillEnabled(ctx)) {
       ctx.report('feishu', health('paused', 'sourceOff'))
       await delay(5000, undefined, { signal }).catch(() => {})
       continue
     }
     const running = new AbortController()
-    const check = setInterval(() => { if (!enabled(ctx)) running.abort() }, 5000)
+    const check = setInterval(() => { if (!stillEnabled(ctx)) running.abort() }, 5000)
+    // The check must never hold the process open: it outlives the loop whenever a shutdown tears the consumer down
+    // while it is still running, and a live timer keeps the event loop alive after everything else has stopped.
+    check.unref?.()
     const stop = () => running.abort()
     signal.addEventListener('abort', stop, { once: true })
     const began = Date.now()
